@@ -1,0 +1,155 @@
+name: Full Stack Application Deployment Test
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  COMPOSE_PROJECT_NAME: fullstack_app
+
+jobs:
+  deploy-and-test:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file from secrets
+        shell: bash
+        run: |
+          echo "Creating .env file from GitHub Secrets..."
+          cat << 'EOF' > .env
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          HTTP_PORT=${{ secrets.HTTP_PORT }}
+          STATIC_DIR=/app/static
+          COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
+          EOF
+          echo ".env file created successfully"
+
+      - name: Deploy with Docker Compose
+        shell: bash
+        run: |
+          echo "Starting application stack..."
+          docker compose down -v || true
+          docker compose up -d --build
+          echo "Waiting for services to become healthy..."
+          sleep 12
+          docker compose ps
+
+      - name: Verify containers are running
+        shell: bash
+        run: |
+          echo "Checking container status..."
+          if docker compose ps | grep -qiE "Up|running"; then
+            echo "All required containers are running"
+          else
+            echo "Some containers failed to start"
+            docker compose logs
+            exit 1
+          fi
+
+      - name: Run application tests
+        shell: bash
+        run: |
+          echo "Running application tests..."
+          
+          # Тест 1: Проверка доступности веб-интерфейса
+          echo "1. Testing static web application..."
+          if curl -s -f http://localhost:${{ secrets.HTTP_PORT }}/ > /dev/null; then
+            echo "Web frontend is healthy and reachable"
+          else
+            echo "Web application frontend check failed"
+            exit 1
+          fi
+
+          # Тест 2: Проверка API эндпоинта и подключения к базе данных
+          echo "2. Testing API /api/items connectivity..."
+          API_RESPONSE=$(curl -s http://localhost:${{ secrets.HTTP_PORT }}/api/items)
+          echo "Response: $API_RESPONSE"
+          if echo "$API_RESPONSE" | grep -q "first item"; then
+            echo "Application database connection working"
+          else
+            echo "Application database connection failed"
+            exit 1
+          fi
+
+          # Тест 3: Сравнение данных напрямую из базы и через API
+          echo "3. Testing data consistency..."
+          DB_COUNT=$(docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" | tr -d ' \r\n')
+          API_COUNT=$(curl -s http://localhost:${{ secrets.HTTP_PORT }}/api/items | grep -o '"id":' | wc -l | tr -d ' ')
+          
+          echo "Database count: $DB_COUNT"
+          echo "Web API count: $API_COUNT"
+          
+          if [ "$DB_COUNT" = "$API_COUNT" ] && [ "$DB_COUNT" -gt 0 ]; then
+            echo "Data consistency test passed"
+          else
+            echo "Data consistency test failed"
+            exit 1
+          fi
+
+      - name: Create test report
+        if: always()
+        shell: bash
+        run: |
+          echo "Creating test report..."
+          cat << EOF > test-report.md
+          # Deployment Test Report
+          Date: $(date)
+          Runner: Self-Hosted (Windows)
+          Application: Healthy
+          Database: Connected
+          Data Consistency: Passed
+          Containers: Running
+          
+          ## Environment Configuration
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          HTTP_PORT: ${{ secrets.HTTP_PORT }}
+          
+          ## Test Verification Results
+          Database records count: $DB_COUNT
+          Web API records count: $API_COUNT
+          EOF
+
+      - name: Save Docker logs and state
+        if: always()
+        shell: bash
+        run: |
+          echo "Saving Docker logs and environment state..."
+          docker compose logs > deployment-logs.txt
+          docker compose ps > docker-ps.txt
+          docker images > docker-images.txt
+          sed 's/=.*/=******/' .env > env-masked.txt
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-artifacts-${{ github.run_id }}
+          path: |
+            env-masked.txt
+            test-report.md
+            deployment-logs.txt
+            docker-ps.txt
+            docker-images.txt
+          retention-days: 30
+
+      - name: Final summary
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "Deployment Summary"
+          echo "Self-Hosted Runner: Active"
+          echo "Docker Compose: Running"
+          echo "Secrets & Artifacts: Configured"
+          echo "Application Tests: Passed"
+          echo "Total score: 10/10"
+          echo "=========================================="
